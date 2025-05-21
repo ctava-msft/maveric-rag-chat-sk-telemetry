@@ -1,0 +1,30 @@
+
+  {
+  "schema": 1,
+  "type": "completion",
+  "description": "Chat with the Tricare Docs",
+  "execution_settings": {
+    "default": {
+      "max_tokens": 4000,
+      "temperature": 0,
+      "top_p": 0.1,
+      "presence_penalty": 0.6,
+      "frequency_penalty": 0.1,
+      "stop_sequences": [
+        "\n"
+      ]
+    }
+  },
+  "input_variables": [
+    {
+      "name": "context",
+      "description": "Background context information for the conversation",
+      "required": true
+    },
+    {
+      "name": "userPrompt",
+      "description": "The user’s question or query",
+      "required": true
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+appsettings.json
+.env
+.history/
+obj/
+bin
