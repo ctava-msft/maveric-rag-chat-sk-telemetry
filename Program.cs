@@ -14,6 +14,7 @@ using OpenTelemetry.Trace;
 using System.Diagnostics;
 using System.Diagnostics.Metrics;
 using SharpToken; // Add this using directive
+using Azure.Monitor.OpenTelemetry.Exporter; // Add this for Application Insights
 
 class Program
 {
@@ -42,6 +43,13 @@ class Program
         // Load environment variables from .env file
         Env.Load();
         
+        // Get Application Insights connection string
+        var connectionString = Environment.GetEnvironmentVariable("APPLICATIONINSIGHTS_CONNECTION_STRING");
+        if (string.IsNullOrEmpty(connectionString))
+        {
+            throw new InvalidOperationException("APPLICATIONINSIGHTS_CONNECTION_STRING environment variable is not set");
+        }
+        
         // Create a kernel builder
         var builder = Kernel.CreateBuilder();
         
@@ -52,28 +60,41 @@ class Program
             logging.SetMinimumLevel(LogLevel.Information);
         });
 
-        // Configure OpenTelemetry
+        // Configure OpenTelemetry with Application Insights
         builder.Services.AddOpenTelemetry()
             .ConfigureResource(resource => resource
-                .AddService("AzureSK.Streaming"))
+                .AddService("AzureSK.Streaming", "1.0.0")
+                .AddAttributes(new Dictionary<string, object>
+                {
+                    ["service.instance.id"] = Environment.MachineName,
+                    ["deployment.environment"] = "development"
+                }))
             .WithTracing(tracing => tracing
                 .AddSource("AzureSK.Streaming")
                 .AddSource("Microsoft.SemanticKernel*")
-                .AddConsoleExporter())
+                .AddAzureMonitorTraceExporter(options =>
+                {
+                    options.ConnectionString = connectionString;
+                })
+                .AddConsoleExporter()) // Keep console for local debugging
             .WithMetrics(metrics => metrics
                 .AddMeter("AzureSK.Streaming")
                 .AddMeter("Microsoft.SemanticKernel*")
-                .AddConsoleExporter());
+                .AddAzureMonitorMetricExporter(options =>
+                {
+                    options.ConnectionString = connectionString;
+                })
+                .AddConsoleExporter()); // Keep console for local debugging
 
         builder.AddAzureOpenAIChatCompletion(
             deploymentName: "gpt-4o-mini",
-            endpoint: "https://jpggz.openai.azure.com",
-            apiKey: "e9ee56f0b75648d6a9f10ebd358db260");
+            endpoint: Environment.GetEnvironmentVariable("AZURE_OPENAI_ENDPOINT") ?? "https://jpggz.openai.azure.com",
+            apiKey: Environment.GetEnvironmentVariable("AZURE_OPENAI_API_KEY") ?? "e9ee56f0b75648d6a9f10ebd358db260");
 
         var kernel = builder.Build();
         var logger = kernel.GetRequiredService<ILogger<Program>>();
         
-        logger.LogInformation("Application started");
+        logger.LogInformation("Application started with Application Insights integration");
 
         // Import plugins from the prompts directory
         var pluginDirectoryPath = "./Prompts";
@@ -106,11 +127,15 @@ class Program
             using var activity = s_activitySource.StartActivity("InvokePluginFunction", ActivityKind.Client);
             activity?.SetTag("function.name", "TricareManual");
             activity?.SetTag("user.prompt.length", userPrompt.Length);
+            activity?.SetTag("service.name", "AzureSK.Streaming");
+            activity?.SetTag("ai.model.name", "gpt-4o-mini");
             
             // Calculate input tokens
             var pluginInputText = $"{userPrompt}\n{mockContext}";
             int inputTokens = CountTokens(pluginInputText);
-            s_inputTokensCounter.Add(inputTokens);
+            
+            // Record input tokens with additional dimensions
+            s_inputTokensCounter.Add(inputTokens, new KeyValuePair<string, object?>("operation", "plugin_function"));
             activity?.SetTag("tokens.input", inputTokens);
             logger.LogInformation("Plugin input tokens: {InputTokens}", inputTokens);
             
@@ -155,8 +180,8 @@ class Program
             int completionTokens = CountTokens(fullResponse.ToString());
             
             // Record metrics
-            s_latencyHistogram.Record(elapsedMs);
-            s_totalTokensCounter.Add(inputTokens + completionTokens);
+            s_latencyHistogram.Record(elapsedMs, new KeyValuePair<string, object?>("operation", "plugin_function"));
+            s_totalTokensCounter.Add(inputTokens + completionTokens, new KeyValuePair<string, object?>("operation", "plugin_function"));
             
             activity?.SetTag("response.total_chunks", chunkCount);
             activity?.SetTag("response.length", fullResponse.Length);
@@ -189,10 +214,12 @@ Please provide a detailed and comprehensive answer.
             // Execute with streaming using a new activity
             using var directActivity = s_activitySource.StartActivity("DirectChatCompletion", ActivityKind.Client);
             directActivity?.SetTag("prompt.length", directPrompt.Length);
+            directActivity?.SetTag("service.name", "AzureSK.Streaming");
+            directActivity?.SetTag("ai.model.name", "gpt-4o-mini");
             
             // Calculate direct chat input tokens
             int directInputTokens = CountTokens(directPrompt);
-            s_inputTokensCounter.Add(directInputTokens);
+            s_inputTokensCounter.Add(directInputTokens, new KeyValuePair<string, object?>("operation", "direct_chat"));
             directActivity?.SetTag("tokens.input", directInputTokens);
             logger.LogInformation("Direct chat input tokens: {InputTokens}", directInputTokens);
             
@@ -239,9 +266,9 @@ Please provide a detailed and comprehensive answer.
             // Calculate final completion tokens
             int directCompletionTokens = CountTokens(directFullResponse.ToString());
             
-            // Record metrics
-            s_latencyHistogram.Record(directElapsedMs);
-            s_totalTokensCounter.Add(directInputTokens + directCompletionTokens);
+            // Record metrics with additional context
+            s_latencyHistogram.Record(directElapsedMs, new KeyValuePair<string, object?>("operation", "direct_chat"));
+            s_totalTokensCounter.Add(directInputTokens + directCompletionTokens, new KeyValuePair<string, object?>("operation", "direct_chat"));
             
             directActivity?.SetTag("response.total_chunks", directChunkCount);
             directActivity?.SetTag("response.length", directFullResponse.Length);
@@ -266,5 +293,8 @@ Please provide a detailed and comprehensive answer.
         }
         
         logger.LogInformation("Application completed");
+        
+        // Ensure all telemetry is flushed before application exits
+        await Task.Delay(5000); // Give time for telemetry to be sent
     }
 }
