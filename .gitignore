@@ -3,3 +3,6 @@ appsettings.json
 .history/
 obj/
 bin
+*.md
+*.new
+*.txt
